@@ -1,0 +1,4 @@
+praw
+pandas
+app-store-scraper
+demoji
