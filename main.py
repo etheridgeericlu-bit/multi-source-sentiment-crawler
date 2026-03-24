@@ -1,8 +1,8 @@
 import re
 import sys
 # Import your custom modules
-import apple_scraper
-import reddit_scraper
+import applestore
+import reddit
 
 def identify_source(input_string):
     """
