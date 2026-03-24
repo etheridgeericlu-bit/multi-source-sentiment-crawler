@@ -1,0 +1,10 @@
+# Ignore SQLite databases
+*.db
+
+# Ignore Python cache
+__pycache__/
+*.pyc
+
+# Ignore sensitive credentials if stored in a file
+config.py
+.env
