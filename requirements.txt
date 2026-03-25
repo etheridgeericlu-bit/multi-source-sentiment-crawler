@@ -1,4 +1,10 @@
-praw
-pandas
-app-store-scraper
-demoji
+# Scraping
+praw==7.7.1
+app-store-scraper==0.3.5
+
+# Data Processing
+pandas>=2.0.0
+emoji>=2.0.0
+
+# Environment (Recommended)
+python-dotenv>=1.0.0
