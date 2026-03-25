@@ -4,7 +4,7 @@ A robust, modular Python tool designed to streamline data collection for sentime
 
 ---
 
-## 🚀 Features
+## Features
 
 * **Smart Dispatcher**: Automatically detects if the input is an Apple App ID, a Subreddit name, or a specific Reddit URL.
 * **Automated Reddit Scraper**: Uses the PRAW (Python Reddit API Wrapper) to crawl "Hot" posts or specific discussion threads.
@@ -17,7 +17,7 @@ A robust, modular Python tool designed to streamline data collection for sentime
 
 ---
 
-## 🛠️ Tech Stack
+## Tech Stack
 
 * **Language**: Python 3.x
 * **Database**: SQLite
@@ -30,9 +30,14 @@ A robust, modular Python tool designed to streamline data collection for sentime
 
 ---
 
-## 📦 Installation & Setup
+## Installation & Setup
 
 1. **Clone the Repository**
    ```bash
    git clone [https://github.com/YOUR_USERNAME/YOUR_REPO_NAME.git](https://github.com/YOUR_USERNAME/YOUR_REPO_NAME.git)
    cd YOUR_REPO_NAME
+
+---
+
+##  Attention！
+* **MUST SUBSTITUTE API CODE IN reddit.py, OTHERWISE IT WILL RETURN NULL**
