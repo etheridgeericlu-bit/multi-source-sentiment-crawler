@@ -40,4 +40,4 @@ A robust, modular Python tool designed to streamline data collection for sentime
 ---
 
 ##  Attention！
-* **MUST SUBSTITUTE API CODE IN reddit.py, OTHERWISE IT WILL RETURN NULL**
+* **MUST SUBSTITUTE API CODE IN reddit.py AND applestore.py, OTHERWISE IT WILL RETURN NULL**
