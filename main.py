@@ -1,94 +1,134 @@
+import argparse
+import logging
 import re
-from urllib.parse import urlparse
+from typing import Optional, Tuple
 
-import applestore
-import reddit
+from applestore import fetch_apple_reviews, load_reviews_to_sqlite
+from db_setup import initialize_database
+from reddit import fetch_reddit_submission, fetch_subreddit_hot_posts, load_posts_to_sqlite
 
-DEFAULT_DB_PATH = "sentiment_pipeline.db"
-APPLE_URL_ID_RE = re.compile(r'/id(\d+)')
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("Pipeline")
 
-
-def identify_source(input_string):
-    """Detect whether the input is Apple App Store or Reddit."""
-    input_string = input_string.strip()
-    if "apps.apple.com" in input_string or input_string.isdigit():
-        return "APPLE"
-    if "reddit.com" in input_string or input_string.startswith("r/"):
-        return "REDDIT"
-    return "UNKNOWN"
-
-
-
-def extract_apple_app_id(user_input):
-    user_input = user_input.strip()
-    if user_input.isdigit():
-        return user_input
-
-    match = APPLE_URL_ID_RE.search(user_input)
-    if not match:
-        raise ValueError("Could not extract Apple App ID from the provided URL.")
-    return match.group(1)
+APPLE_ID_RE = re.compile(r"(?:id)?(?P<app_id>\d{6,12})$")
+APPLE_URL_RE = re.compile(r"apps\.apple\.com/.*/app/.*/id(?P<app_id>\d{6,12})")
+REDDIT_POST_URL_RE = re.compile(
+    r"reddit\.com/r/(?P<subreddit>[A-Za-z0-9_]{3,21})/comments/(?P<post_id>[A-Za-z0-9]+)"
+)
+REDDIT_SUB_URL_RE = re.compile(r"reddit\.com/r/(?P<subreddit>[A-Za-z0-9_]{3,21})(?:/|$)")
+SUBREDDIT_NAME_RE = re.compile(r"^(?:r/)?(?P<subreddit>[A-Za-z0-9_]{3,21})$")
 
 
+def identify_input_source(user_input: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Returns one of:
+      ("APPLE", app_id)
+      ("REDDIT_POST", post_id)
+      ("REDDIT_SUBREDDIT", subreddit_name)
+      (None, None)
+    """
+    normalized = user_input.strip()
+    lowered = normalized.lower()
 
-def extract_apple_app_name(user_input, fallback_app_id):
-    """Try to infer the app slug from an Apple URL; otherwise fall back to app-{id}."""
-    if 'apps.apple.com' not in user_input:
-        return f"app-{fallback_app_id}"
+    apple_url_match = APPLE_URL_RE.search(lowered)
+    if apple_url_match:
+        return "APPLE", apple_url_match.group("app_id")
 
-    path_parts = [part for part in urlparse(user_input).path.split('/') if part]
-    if len(path_parts) >= 3:
-        return path_parts[-2]
-    return f"app-{fallback_app_id}"
+    apple_id_match = APPLE_ID_RE.fullmatch(lowered)
+    if apple_id_match:
+        return "APPLE", apple_id_match.group("app_id")
 
+    reddit_post_match = REDDIT_POST_URL_RE.search(lowered)
+    if reddit_post_match:
+        return "REDDIT_POST", reddit_post_match.group("post_id")
 
+    reddit_sub_url_match = REDDIT_SUB_URL_RE.search(lowered)
+    if reddit_sub_url_match:
+        return "REDDIT_SUBREDDIT", reddit_sub_url_match.group("subreddit")
 
-def normalize_subreddit_name(user_input):
-    user_input = user_input.strip()
-    if user_input.startswith('r/'):
-        return user_input[2:]
-    if 'reddit.com' in user_input:
-        parsed = urlparse(user_input)
-        match = re.search(r'/r/([^/]+)/?', parsed.path)
-        if match:
-            return match.group(1)
-    return user_input
+    subreddit_name_match = SUBREDDIT_NAME_RE.fullmatch(lowered)
+    if subreddit_name_match:
+        return "REDDIT_SUBREDDIT", subreddit_name_match.group("subreddit")
 
+    return None, None
 
 
-def run_dispatcher(user_input, db_path=DEFAULT_DB_PATH, apple_count=100, reddit_limit=50):
-    user_input = user_input.strip()
-    source_type = identify_source(user_input)
-    print(f"[*] Detected Source: {source_type}")
+def run_apple_pipeline(app_id: str, count: int, db_path: str, country: str) -> int:
+    logger.info("Starting Apple App Store pipeline for app_id=%s", app_id)
+    reviews_df, resolved_app_name = fetch_apple_reviews(
+        app_id=app_id,
+        country=country,
+        count=count,
+    )
+    if reviews_df.empty:
+        return 0
+    return load_reviews_to_sqlite(
+        reviews_df,
+        app_name=resolved_app_name,
+        app_id=app_id,
+        db_path=db_path,
+    )
 
-    if source_type == "APPLE":
-        app_id = extract_apple_app_id(user_input)
-        app_name = extract_apple_app_name(user_input, app_id)
 
-        applestore.setup_database(db_path=db_path)
-        df = applestore.fetch_apple_reviews(app_name=app_name, app_id=app_id, count=apple_count)
-        inserted = applestore.load_data_to_sqlite(df, app_name, app_id, db_path=db_path)
-        print(f"[+] Finished Apple pipeline. Inserted {inserted} rows into {db_path}.")
-        return df
+def run_reddit_subreddit_pipeline(subreddit_name: str, limit: int, db_path: str) -> int:
+    logger.info("Starting Reddit subreddit pipeline for r/%s", subreddit_name)
+    posts_df = fetch_subreddit_hot_posts(subreddit_name=subreddit_name, limit=limit)
+    return load_posts_to_sqlite(posts_df, db_path=db_path)
 
-    if source_type == "REDDIT":
-        reddit.setup_database(db_path=db_path)
-        if "reddit.com" in user_input:
-            df = reddit.fetch_by_url(user_input)
+
+def run_reddit_post_pipeline(post_id: str, db_path: str) -> int:
+    logger.info("Starting Reddit single-submission pipeline for post_id=%s", post_id)
+    posts_df = fetch_reddit_submission(post_id=post_id)
+    return load_posts_to_sqlite(posts_df, db_path=db_path)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Multi-Source Sentiment Data Crawler")
+    parser.add_argument("input", help="Apple App ID/URL OR subreddit name/URL OR Reddit post URL")
+    parser.add_argument("--count", type=int, default=200, help="Number of items to fetch")
+    parser.add_argument("--db-path", default="sentiment_pipeline.db", help="SQLite database path")
+    parser.add_argument("--country", default="us", help="Apple App Store country code, e.g. us, ca")
+    args = parser.parse_args()
+
+    if args.count <= 0:
+        raise ValueError("--count must be a positive integer")
+
+    initialize_database(db_path=args.db_path)
+    source_type, resolved_value = identify_input_source(args.input)
+
+    if source_type is None or resolved_value is None:
+        logger.error(
+            "Could not recognize input '%s'. Use an App Store ID/URL, a subreddit name/URL, or a Reddit post URL.",
+            args.input,
+        )
+        return
+
+    try:
+        if source_type == "APPLE":
+            new_records = run_apple_pipeline(
+                app_id=resolved_value,
+                count=args.count,
+                db_path=args.db_path,
+                country=args.country,
+            )
+        elif source_type == "REDDIT_SUBREDDIT":
+            new_records = run_reddit_subreddit_pipeline(
+                subreddit_name=resolved_value,
+                limit=args.count,
+                db_path=args.db_path,
+            )
         else:
-            sub_name = normalize_subreddit_name(user_input)
-            df = reddit.fetch_subreddit_posts(sub_name, post_limit=reddit_limit)
+            new_records = run_reddit_post_pipeline(post_id=resolved_value, db_path=args.db_path)
 
-        inserted = reddit.load_to_db(df, db_path=db_path)
-        print(f"[+] Finished Reddit pipeline. Inserted {inserted} rows into {db_path}.")
-        return df
-
-    raise ValueError("Source not recognized. Use an Apple App Store URL/App ID, a Reddit URL, or r/community name.")
+        logger.info("Pipeline finished. Inserted/updated %d record(s).", new_records)
+    except Exception:
+        logger.exception("Pipeline failed due to an uncaught exception")
+        raise
 
 
 if __name__ == "__main__":
-    target = input("Enter Apple App ID, Apple URL, Reddit URL, or Subreddit (e.g. r/technology): ")
-    try:
-        run_dispatcher(target)
-    except Exception as exc:
-        print(f"[-] Error: {exc}")
+    main()
