@@ -1,7 +1,7 @@
 import argparse
 import logging
 import re
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from applestore import fetch_apple_reviews, load_reviews_to_sqlite
 from db_setup import initialize_database
@@ -57,12 +57,24 @@ def identify_input_source(user_input: str) -> Tuple[Optional[str], Optional[str]
     return None, None
 
 
-def run_apple_pipeline(app_id: str, count: int, db_path: str, country: str) -> int:
+def run_apple_pipeline(
+    app_id: str,
+    count: int,
+    db_path: str,
+    country: str,
+    *,
+    drop_low_signal: bool,
+    min_quality: Optional[float],
+    keep_languages: Optional[List[str]],
+) -> int:
     logger.info("Starting Apple App Store pipeline for app_id=%s", app_id)
     reviews_df, resolved_app_name = fetch_apple_reviews(
         app_id=app_id,
         country=country,
         count=count,
+        drop_low_signal=drop_low_signal,
+        min_quality=min_quality,
+        keep_languages=keep_languages,
     )
     if reviews_df.empty:
         return 0
@@ -74,16 +86,49 @@ def run_apple_pipeline(app_id: str, count: int, db_path: str, country: str) -> i
     )
 
 
-def run_reddit_subreddit_pipeline(subreddit_name: str, limit: int, db_path: str) -> int:
+def run_reddit_subreddit_pipeline(
+    subreddit_name: str,
+    limit: int,
+    db_path: str,
+    *,
+    drop_low_signal: bool,
+    min_quality: Optional[float],
+    keep_languages: Optional[List[str]],
+) -> int:
     logger.info("Starting Reddit subreddit pipeline for r/%s", subreddit_name)
-    posts_df = fetch_subreddit_hot_posts(subreddit_name=subreddit_name, limit=limit)
+    posts_df = fetch_subreddit_hot_posts(
+        subreddit_name=subreddit_name,
+        limit=limit,
+        drop_low_signal=drop_low_signal,
+        min_quality=min_quality,
+        keep_languages=keep_languages,
+    )
     return load_posts_to_sqlite(posts_df, db_path=db_path)
 
 
-def run_reddit_post_pipeline(post_id: str, db_path: str) -> int:
+def run_reddit_post_pipeline(
+    post_id: str,
+    db_path: str,
+    *,
+    drop_low_signal: bool,
+    min_quality: Optional[float],
+    keep_languages: Optional[List[str]],
+) -> int:
     logger.info("Starting Reddit single-submission pipeline for post_id=%s", post_id)
-    posts_df = fetch_reddit_submission(post_id=post_id)
+    posts_df = fetch_reddit_submission(
+        post_id=post_id,
+        drop_low_signal=drop_low_signal,
+        min_quality=min_quality,
+        keep_languages=keep_languages,
+    )
     return load_posts_to_sqlite(posts_df, db_path=db_path)
+
+
+def _parse_languages(value: Optional[str]) -> Optional[List[str]]:
+    if not value:
+        return None
+    langs = [part.strip() for part in value.split(",") if part.strip()]
+    return langs or None
 
 
 def main() -> None:
@@ -92,20 +137,50 @@ def main() -> None:
     parser.add_argument("--count", type=int, default=200, help="Number of items to fetch")
     parser.add_argument("--db-path", default="sentiment_pipeline.db", help="SQLite database path")
     parser.add_argument("--country", default="us", help="Apple App Store country code, e.g. us, ca")
+
+    # --- Cleaning / filtering knobs (Phase-I data quality work) ---
+    parser.add_argument(
+        "--drop-low-signal",
+        action="store_true",
+        help="Drop reviews/posts flagged as low-signal by the preprocessing layer.",
+    )
+    parser.add_argument(
+        "--min-quality",
+        type=float,
+        default=None,
+        help="Drop items whose computed quality_score is below this threshold (0.0-1.0).",
+    )
+    parser.add_argument(
+        "--keep-languages",
+        default=None,
+        help="Comma-separated ISO 639-1 codes to keep (e.g. 'en,zh'). "
+        "Rows with undetected language are always kept.",
+    )
+
     args = parser.parse_args()
 
     if args.count <= 0:
         raise ValueError("--count must be a positive integer")
+    if args.min_quality is not None and not (0.0 <= args.min_quality <= 1.0):
+        raise ValueError("--min-quality must be between 0.0 and 1.0")
 
     initialize_database(db_path=args.db_path)
     source_type, resolved_value = identify_input_source(args.input)
 
     if source_type is None or resolved_value is None:
         logger.error(
-            "Could not recognize input '%s'. Use an App Store ID/URL, a subreddit name/URL, or a Reddit post URL.",
+            "Could not recognize input '%s'. Use an App Store ID/URL, a subreddit name/URL, "
+            "or a Reddit post URL.",
             args.input,
         )
         return
+
+    keep_languages = _parse_languages(args.keep_languages)
+    common_filter_kwargs = dict(
+        drop_low_signal=args.drop_low_signal,
+        min_quality=args.min_quality,
+        keep_languages=keep_languages,
+    )
 
     try:
         if source_type == "APPLE":
@@ -114,15 +189,21 @@ def main() -> None:
                 count=args.count,
                 db_path=args.db_path,
                 country=args.country,
+                **common_filter_kwargs,
             )
         elif source_type == "REDDIT_SUBREDDIT":
             new_records = run_reddit_subreddit_pipeline(
                 subreddit_name=resolved_value,
                 limit=args.count,
                 db_path=args.db_path,
+                **common_filter_kwargs,
             )
         else:
-            new_records = run_reddit_post_pipeline(post_id=resolved_value, db_path=args.db_path)
+            new_records = run_reddit_post_pipeline(
+                post_id=resolved_value,
+                db_path=args.db_path,
+                **common_filter_kwargs,
+            )
 
         logger.info("Pipeline finished. Inserted/updated %d record(s).", new_records)
     except Exception:
